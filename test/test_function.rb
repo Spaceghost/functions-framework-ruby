@@ -65,14 +65,13 @@ describe FunctionsFramework::Function do
 
   it "represents an http function using an object" do
     callable = proc do |request|
-      assert_equal "the-request", request
-      "hello"
+      request
     end
     function = FunctionsFramework::Function.http "my_func", callable: callable
     assert_equal "my_func", function.name
     assert_equal :http, function.type
     response = function.call "the-request"
-    assert_equal "hello", response
+    assert_equal "the-request", response
   end
 
   it "represents an http function using a class" do
@@ -239,6 +238,194 @@ describe FunctionsFramework::Function do
       assert_raises ::ArgumentError do
         FunctionsFramework::Function.typed "bad_fn", request_class: ::Class
       end
+    end
+
+    it "function includes a module in a function's singleton class during definition" do
+      mod = Module.new do
+        def block_included_method
+          "included method response"
+        end
+      end
+
+      function = FunctionsFramework::Function.http "my_func" do
+        include mod
+        "original response"
+      end
+      response = function.call "the-request", globals: { function_name: function.name }
+
+      assert function.callable_class.included_modules.include?(mod)
+      assert_equal "original response", response
+    end
+
+    it "function includes a module in a function's singleton class after definition" do
+      mod = Module.new do
+        def included_method
+          "included method response"
+        end
+      end
+      function = FunctionsFramework::Function.http "my_func" do
+        "original response"
+      end
+      function.include mod
+
+      assert function.callable_class.included_modules.include? mod
+      response = function.call "the-request", globals: { function_name: function.name }
+      assert_equal "original response", response
+    end
+
+    it "function retains function behavior when including multiple modules" do
+      mod1 = Module.new do
+        def call(*)
+          "#{method_from_mod1} call"
+        end
+
+        def method_from_mod1
+          "response from mod1"
+        end
+      end
+
+      mod2 = Module.new do
+        def method_from_mod2
+          "response from mod2"
+        end
+
+        def call(*)
+          super
+        end
+      end
+
+      mod3 = Module.new do
+        def method_from_mod3
+          "response from mod3"
+        end
+      end
+
+      function = FunctionsFramework::Function.http "my_func" do
+        include mod1
+        include mod2
+
+        super()
+      end
+      function.include mod3
+      refute function.callable_class.included_modules.include? mod1
+      refute function.callable_class.included_modules.include? mod2
+      assert function.callable_class.included_modules.include? mod3
+      response = function.call "the-request", globals: { function_name: function.name }
+
+      assert function.callable_class.included_modules.include? mod1
+      assert function.callable_class.included_modules.include? mod2
+      assert function.callable_class.included_modules.include? mod3
+      assert_equal "response from mod1 call", response
+    end
+
+    it "handles including modules by function name during and after definition" do
+      mod1 = Module.new do
+        def included_method
+          "included method response"
+        end
+      end
+
+      mod2 = Module.new do
+        def block_included_method
+          "block included method response"
+        end
+      end
+
+      function = FunctionsFramework::Function.http "my_func" do
+        include mod2
+        "original response"
+      end
+      function.include mod1
+      assert function.callable_class.included_modules.include? mod1
+      refute function.callable_class.included_modules.include? mod2
+
+      response = function.call "the-request"
+      assert function.callable_class.included_modules.include? mod1
+      assert function.callable_class.included_modules.include? mod2
+      assert_equal "original response", response
+    end
+
+    it "handles including modules using a callable class but does not share included modules across functions" do
+      klass = Class.new do
+        def initialize **_keywords
+        end
+
+        def call request
+          request == "the-request" ? "hello" : "whoops"
+        end
+      end
+
+      mod1 = Module.new do
+        def included_method
+          "included method response"
+        end
+      end
+
+      function = FunctionsFramework::Function.http "my_func", callable: klass
+      function.include mod1
+      assert function.callable_class.included_modules.include?(mod1)
+
+      assert_equal "my_func", function.name
+      assert_equal :http, function.type
+      response = function.call "the-request"
+      assert_equal "hello", response
+
+      function2 = FunctionsFramework::Function.http "my_func2", callable: klass
+      function2.call "the-request"
+      refute function2.callable_class.included_modules.include?(mod1)
+    end
+
+    it "handles including modules using a callable object but does not share included modules across functions" do
+      mod1 = Module.new do
+        def included_method
+          "included method response"
+        end
+      end
+      object = lambda do |_request|
+        include mod1
+
+        included_method
+      end
+      mod2 = Module.new do
+        def included_method2
+          "included method2 response"
+        end
+      end
+      object3 = Object.new.tap do |obj|
+        obj.singleton_class.define_method :call do |_request = nil|
+          include mod1
+
+          [included_method, included_method2].join " and "
+        end
+      end
+
+      function = FunctionsFramework::Function.http "my_func", callable: object
+      refute function.callable_class.included_modules.include? mod1
+      function.include mod2
+      assert function.callable_class.included_modules.include? mod2
+
+      response = function.call "the-request"
+
+      assert function.callable_class.included_modules.include? mod1
+      assert function.callable_class.included_modules.include? mod2
+      assert_equal "included method response", response
+
+      function2 = FunctionsFramework::Function.http "my_func2", callable: object
+      refute function2.callable_class.included_modules.include? mod1
+      function2.call "the-request"
+      assert function2.callable_class.included_modules.include? mod1
+      refute function2.callable_class.included_modules.include? mod2
+
+      function3 = FunctionsFramework::Function.http "my_func3", callable: object3
+      refute function3.callable_class.included_modules.include? mod1
+      refute function3.callable_class.included_modules.include? mod2
+
+      function3.include mod2
+      response = function3.call "the-request"
+      assert function3.callable_class.included_modules.include? mod1
+      assert function3.callable_class.included_modules.include? mod2
+
+      assert_equal "included method response and included method2 response", response
     end
   end
 end

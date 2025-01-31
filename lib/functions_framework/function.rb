@@ -119,6 +119,7 @@ module FunctionsFramework
     # @param callable [Class,#call] A callable object or class.
     # @param block [Proc] The function code as a block.
     #
+    # rubocop:disable Metrics/MethodLength
     def initialize name, type, callable: nil, request_class: nil, &block
       @name = name
       @type = type
@@ -126,16 +127,86 @@ module FunctionsFramework
       @callable = @callable_class = nil
       if callable.respond_to? :call
         @callable = callable
+        @callable_class =
+          if callable.is_a? Proc
+            ::Class.new(Callable).tap do |klass|
+              klass.instance_exec callable do |callable|
+                define_method :call do |request = nil, *args, **kwargs, &block|
+                  if block
+                    instance_exec request, *args, block, **kwargs, &callable
+                  else
+                    instance_exec request, *args, **kwargs, &callable
+                  end
+                end
+                define_method :include do |mod|
+                  self.class.send :include, mod
+                end
+              end
+            end
+          else
+            ::Class.new(Callable).tap do |klass|
+              unless callable.respond_to? :include
+                callable.define_singleton_method :include, &klass.method(:include)
+              end
+              unless callable.respond_to? :to_proc
+                callable.define_singleton_method :to_proc do
+                  proc { instance_exec(*args, **kwargs, &method(:call)) }
+                end
+              end
+              callable.define_singleton_method :respond_to? do |meth|
+                klass.instance_methods.include?(meth) || super
+              end
+              callable.define_singleton_method :method_missing do |meth, *args, **kwargs, &block|
+                if klass.instance_methods.include? meth
+                  @__callable ||= klass.new(callable: self, logger: kwargs.fetch(:logger, @__logger), globals: kwargs.fetch(:globals, @__globals))
+                  define_singleton_method meth, *args, **kwargs, &@__callable.method(meth)
+                  if block_given?
+                    send meth, *args, **kwargs, &block
+                  else
+                    send meth, *args, **kwargs
+                  end
+                else
+                  super
+                end
+              end
+              klass.instance_exec callable do |callable|
+                define_method :call do |request = nil, *args, **kwargs, &block|
+                  if block_given?
+                    callable.call request, *args, **kwargs, &block
+                  else
+                    callable.call request, *args, **kwargs
+                  end
+                end
+              end
+            end
+          end
       elsif callable.is_a? ::Class
-        @callable_class = callable
+        # @callable = block if block_given?
+        @callable_class = ::Class.new callable do
+          define_method :call do |request = nil, *args, **kwargs, &block|
+            if block_given?
+              super(request, *args, **kwargs, &block)
+            else
+              super(request, *args, **kwargs)
+            end
+          end
+          define_method :include do |mod|
+            self.class.send :include, mod
+          end
+        end
       elsif block_given?
-        @callable_class = ::Class.new Callable do
+        @callable_class = ::Class.new callable || Callable do
           define_method :call, &block
+
+          define_method :include do |mod|
+            self.class.send :include, mod
+          end
         end
       else
         raise ::ArgumentError, "No callable given for function"
       end
     end
+    # rubocop:enable Metrics/MethodLength
 
     ##
     # @return [String] The function name
@@ -153,6 +224,11 @@ module FunctionsFramework
     attr_reader :request_class
 
     ##
+    # @return [Class] The wrapper class of the callable.
+    #
+    attr_reader :callable_class
+
+    ##
     # Populate the given globals hash with this function's info.
     #
     # @param globals [Hash] Initial globals hash (optional).
@@ -162,6 +238,18 @@ module FunctionsFramework
       result = { function_name: name, function_type: type }
       result.merge! globals if globals
       result
+    end
+
+    ##
+    # Forward the `include` method to the Callable wrapper class.
+    #
+    # Calling this method on the instance of Function immediately after definition
+    # is preferable to calling include inside the function.
+    #
+    # @param mod [Module] The module to include into the object's wrapper class.
+    #
+    def include mod
+      @callable_class.send :include, mod
     end
 
     ##
@@ -178,13 +266,17 @@ module FunctionsFramework
     # @return [Object] The function return value.
     #
     def call *args, globals: nil, logger: nil
-      callable = @callable || @callable_class.new(globals: globals, logger: logger)
+      callable = @callable_class.new callable: @callable, globals: globals, logger: logger
       params = callable.method(:call).parameters.map(&:first)
       unless params.include? :rest
         max_params = params.count(:req) + params.count(:opt)
         args = args.take max_params
       end
-      callable.call(*args)
+      if @callable.is_a? ::Proc
+        callable.instance_exec(*args, &@callable)
+      else
+        callable.call(*args)
+      end
     end
 
     ##
@@ -221,9 +313,10 @@ module FunctionsFramework
       # @param globals [Hash] A set of globals available to the call.
       # @param logger [Logger] A logger for use by the function call.
       #
-      def initialize globals: nil, logger: nil
-        @__globals = globals || {}
-        @__logger = logger || FunctionsFramework.logger
+      def initialize callable: nil, globals: nil, logger: nil
+        @callable = callable
+        @__globals = globals || callable.instance_variable_get(:@__globals) || {}
+        @__logger = logger || callable.instance_variable_get(:@__logger) || FunctionsFramework.logger
       end
 
       ##

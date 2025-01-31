@@ -101,4 +101,34 @@ describe FunctionsFramework::Registry do
     response = registry["my_func"].call "the-request"
     assert_equal "hello", response
   end
+
+  it "handles including modules by function name during and after definition" do
+    mod1 = Module.new do
+      def included_method
+        "included method response"
+      end
+    end
+
+    mod2 = Module.new do
+      def block_included_method
+        "block included method response"
+      end
+    end
+
+    registry.add_http "my_func" do
+      include mod2
+
+      block_included_method
+    end
+
+    function = registry["my_func"]
+    function.include mod1
+    assert function.callable_class.included_modules.include? mod1
+    refute function.callable_class.included_modules.include? mod2
+
+    response = function.call "the-request"
+    assert function.callable_class.included_modules.include? mod1
+    assert function.callable_class.included_modules.include? mod2
+    assert_equal "block included method response", response
+  end
 end
